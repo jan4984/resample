@@ -32,6 +32,7 @@ import (
 	"errors"
 	"io"
 	"unsafe"
+	"fmt"
 )
 
 const (
@@ -50,6 +51,8 @@ const (
 
 	byteLen = 8
 )
+
+var ErrWaitMoreInput = errors.New("Not enough input to generate output")
 
 // Resampler resamples PCM sound data.
 type Resampler struct {
@@ -139,28 +142,35 @@ func (r *Resampler) Close() (err error) {
 // the underlying data stream, returns the number of bytes written
 // from p (0 <= n <= len(p)) and any error encountered that caused
 // the write to stop early.
+
+
+//for flush last samples
+// https://sourceforge.net/p/soxr/code/ci/master/tree/examples/2-stream.C
 func (r *Resampler) Write(p []byte) (i int, err error) {
 	if r.resampler == nil {
 		err = errors.New("soxr resampler is nil")
 		return
 	}
+	var dataIn *C.void
+	var framesOut int = 0
+	var framesIn int = 0
+	if p == nil {
+		p = []byte("")
+		fmt.Println("to flush")
+	}
 	if len(p) == 0 {
-		return
+		dataIn = (*C.void)(C.NULL)
+		framesIn = 0
+		framesOut = 480
+	}else{
+		dataIn = (*C.void)(unsafe.Pointer(&p[0]))
+		framesIn = len(p) / r.frameSize / r.channels
+		framesOut = int(float64(framesIn) * (r.outRate / r.inRate))
 	}
-	framesIn := len(p) / r.frameSize / r.channels
-	if framesIn == 0 {
-		err = errors.New("Incomplete input frame data")
-		return
-	}
+
 	if len(p)%(r.frameSize/r.channels) != 0 {
 		err = errors.New("Fragmented last frame in input data")
 	}
-	framesOut := int(float64(framesIn) * (r.outRate / r.inRate))
-	if framesOut == 0 {
-		err = errors.New("Not enough input to generate output")
-		return
-	}
-	dataIn := C.CBytes(p)
 	dataOut := C.malloc(C.size_t(framesOut * r.channels * r.frameSize))
 	var soxErr C.soxr_error_t
 	var read, done C.size_t = 0, 0
@@ -168,8 +178,15 @@ func (r *Resampler) Write(p []byte) (i int, err error) {
 	if C.GoString(soxErr) != "" && C.GoString(soxErr) != "0" {
 		err = errors.New(C.GoString(soxErr))
 	} else if int(done) == 0 {
-		err = errors.New("Not enough input to generate output")
+		if(len(p) == 0){
+			fmt.Println("soxr got EOF")
+			err = io.EOF
+		}else {
+			fmt.Println("soxr got ErrWaitMoreInput")
+			err = ErrWaitMoreInput
+		}
 	} else {
+		//fmt.Println("soxr got:", int(done), "bytes")
 		var werr error
 		i, werr = r.destination.Write(C.GoBytes(dataOut, C.int(int(done)*r.channels*r.frameSize)))
 		if werr != nil {
@@ -183,7 +200,7 @@ func (r *Resampler) Write(p []byte) (i int, err error) {
 			i = len(p)
 		}
 	}
-	C.free(dataIn)
+	//C.free(dataIn)
 	C.free(dataOut)
 	C.free(unsafe.Pointer(soxErr))
 	return
